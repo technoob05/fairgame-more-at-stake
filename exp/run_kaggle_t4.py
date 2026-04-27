@@ -56,10 +56,11 @@ RESULTS_DIR = WORKDIR / "results"
 RAW_DIR = RESULTS_DIR / "raw"
 
 
-def _pip_install(*pkgs: str) -> None:
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", *pkgs]
-    )
+def _pip_install(*pkgs: str, upgrade: bool = False) -> None:
+    cmd = [sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check"]
+    if upgrade:
+        cmd.append("-U")
+    subprocess.check_call(cmd + list(pkgs))
 
 
 def bootstrap() -> None:
@@ -85,14 +86,46 @@ def bootstrap() -> None:
         "sentencepiece",
         "protobuf",
         "kagglehub",               # for Gemma-4 / Nemotron via Kaggle model registry
-        # FAIRGAME's llm_factory imports these at module load even though we
-        # never call them — without these installed the import chain fails.
-        "anthropic",
-        "mistralai",
-        "openai",
         "striprtf",                # used by FileManager for cn/vn .rtf templates
         "retry",
     )
+
+
+def _stub_unused_sdks() -> None:
+    """Provide minimal stubs for SDKs FAIRGAME imports but we never call.
+
+    FAIRGAME's llm_factory_connector unconditionally imports the anthropic /
+    mistralai / openai connectors at module load, and each does `from <pkg>
+    import <Class>`. Installing the real SDKs on Kaggle is fragile (different
+    Kaggle images ship different pinned versions, and forcing an upgrade
+    breaks other preinstalled tooling). Since we route every prompt through
+    LocalHFConnector, those classes are never instantiated — a stub is enough
+    to make the import chain succeed.
+    """
+    import types
+    for pkg, cls_name in [
+        ("anthropic", "Anthropic"),
+        ("mistralai", "Mistral"),
+        ("openai",    "OpenAI"),
+    ]:
+        try:
+            mod = __import__(pkg)
+            if hasattr(mod, cls_name):
+                continue
+        except Exception:
+            mod = None
+        if mod is None:
+            mod = types.ModuleType(pkg)
+            sys.modules[pkg] = mod
+        # Stub class — FAIRGAME never instantiates it; if it ever does the
+        # call site will get a clear NameError-style failure rather than
+        # a silent network call.
+        def _stub_init(self, *a, **k):
+            raise RuntimeError(
+                f"{cls_name} is a stub from run_kaggle_t4.py; commercial "
+                "providers are not configured for this run."
+            )
+        setattr(mod, cls_name, type(cls_name, (), {"__init__": _stub_init}))
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +370,7 @@ class LocalHFConnector:
 
 def register_local_models() -> None:
     """Inject our local connectors into FAIRGAME's provider map."""
+    _stub_unused_sdks()  # must run before any `src.*` import
     from src.llm_connectors import llm_factory_connector as fc
     for m in EXPERIMENT_CONFIG["models"]:
         LocalHFConnector.register(m)
