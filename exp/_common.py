@@ -102,8 +102,11 @@ def _stub_unused_sdks() -> None:
 
 MODEL_REGISTRY: dict = {
     # Llama family — unsloth ungated 4-bit mirrors (no HF_TOKEN needed).
+    # sec_per_call values are calibrated from actual Kaggle T4 runs:
+    #   Llama3_2_3B s=10  : 3h11m / 6000 calls = 1.91 s/call (measured)
+    #   Llama3_1_8B s=1   : 502s / 80 calls    = 6.28 s/call (smoke test)
     "Llama3_2_3B":   dict(source="hf", path="unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
-                          load_in_4bit=False, is_reasoning=False, sec_per_call=3.0),
+                          load_in_4bit=False, is_reasoning=False, sec_per_call=1.9),
     "Llama3_1_8B":   dict(source="hf", path="unsloth/Llama-3.1-8B-Instruct-bnb-4bit",
                           load_in_4bit=False, is_reasoning=False, sec_per_call=6.3),
 
