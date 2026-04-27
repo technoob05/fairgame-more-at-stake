@@ -142,8 +142,14 @@ MODEL_REGISTRY: dict = {
                              load_in_4bit=True, is_reasoning=False, sec_per_call=6.0),
 }
 
+# PD points to *round_not_known* to match the paper-released dataset
+# (data_fairgame/*/* CSVs all have nRoundsIsKnown=False). Without this the
+# horizon is finite-and-known, agents backward-induct, and you lose all
+# cooperation by Round 1 — utterly different game-theoretic regime.
+# The other games stick with their 'round_known' variant since the paper
+# does not release equivalent datasets for them.
 GAME_CONFIG_FILES = {
-    "prisoner_dilemma": "prisoner_dilemma_nocomm_round_known_mild.json",
+    "prisoner_dilemma": "prisoner_dilemma_nocomm_round_not_known_mild.json",
     "stag_hunt":        "stag_hunt_nocomm_round_known_conventional.json",
     "snow_drift":       "snow_drift_nocomm_round_known_conventional.json",
     "battle_sexes":     "battle_sexes_nocomm_round_known_conventional.json",
