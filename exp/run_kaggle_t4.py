@@ -322,12 +322,25 @@ class LocalHFConnector:
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
 
+        # Build kwargs carefully: passing quantization_config=None to recent
+        # transformers (>=4.50) overrides the checkpoint's saved quant config
+        # and then crashes during config.__repr__ on `quant_cfg.to_dict()`.
+        # Only pass it when we have a real BitsAndBytesConfig; otherwise let
+        # transformers auto-detect from the (possibly pre-quantized) checkpoint.
         mdl_kw = {
-            "quantization_config": bnb,
             "device_map": "auto",
-            "torch_dtype": torch.float16,
             "trust_remote_code": True,
         }
+        # transformers 4.50+ renamed torch_dtype -> dtype (old name still works
+        # but emits a deprecation warning and may eventually break).
+        try:
+            import transformers as _tf
+            major, minor = (int(x) for x in _tf.__version__.split(".")[:2])
+            mdl_kw["dtype" if (major, minor) >= (4, 50) else "torch_dtype"] = torch.float16
+        except Exception:
+            mdl_kw["torch_dtype"] = torch.float16
+        if bnb is not None:
+            mdl_kw["quantization_config"] = bnb
         if hf_token and cfg.get("source", "hf") == "hf":
             mdl_kw["token"] = hf_token
         mdl = AutoModelForCausalLM.from_pretrained(model_path, **mdl_kw)
