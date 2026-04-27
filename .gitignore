@@ -16,3 +16,6 @@ __pycache__/
 
 # playground files
 __playground/
+
+# local research scratch (not part of the published repo)
+fairgame-hackathon-research/
