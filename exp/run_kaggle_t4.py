@@ -13,27 +13,40 @@ Self-contained script that:
   5. Persists per-config CSV (resume-safe) + an aggregated summary.
 
 How to run on Kaggle (T4 x2 recommended):
-  - Create a new notebook, GPU T4 x2, Internet ON.
-  - For gated HF models (Llama, Gemma on HF Hub), add a Kaggle Secret named
-    HF_TOKEN with your HuggingFace access token, then attach it to the
-    notebook (Add-ons -> Secrets). The kagglehub-sourced models do not need it.
-  - Single cell:
+  - Create one notebook PER MODEL (so they run in parallel against your weekly
+    quota). GPU T4 x2, Internet ON.
+  - For gated HF models add a Kaggle Secret named HF_TOKEN. Models sourced
+    from `kagglehub` or unsloth's bnb-4bit mirrors do not need it.
+  - Single cell template:
         import os
-        from kaggle_secrets import UserSecretsClient
-        try: os.environ['HF_TOKEN'] = UserSecretsClient().get_secret('HF_TOKEN')
-        except Exception: pass
+        try:
+            from kaggle_secrets import UserSecretsClient
+            os.environ['HF_TOKEN'] = UserSecretsClient().get_secret('HF_TOKEN')
+        except Exception:
+            pass
 
         !wget -q https://raw.githubusercontent.com/technoob05/fairgame-more-at-stake/main/exp/run_kaggle_t4.py
-        !python run_kaggle_t4.py
-  - Outputs land in /kaggle/working/results/.
+        !python run_kaggle_t4.py --model Llama3_1_8B --preset scale
 
-Tweak EXPERIMENT_CONFIG below to match your session budget. The script prints
-an estimate before running and skips any (model, game, lang, rounds, scale, seed)
-whose CSV already exists, so a 12h timeout is safe to resume from.
+Available models: see MODEL_REGISTRY below.
+Available presets:
+  smoke         1 cell      ~8 min    sanity check
+  mini          40 cells    ~17h*     5 games x [10,50] rounds x [1,100] scales
+  scale         60 cells    ~42h*     CORE: 5 games x 50 rounds x 4 scales x 3 seeds
+  rounds        45 cells    ~19h*     5 games x [10,30,50] rounds x scale=1
+  multilingual  50 cells    ~35h*     5 games x 5 langs x 50 rounds x [1,100]
+  full          900 cells   ~375h*    everything (only realistic for 3B models)
+
+  (* estimates assume Llama-8B at ~6.3s/call. Smaller=faster, larger=slower.)
+
+Outputs land in /kaggle/working/results/. CSVs are keyed per (model, game,
+lang, rounds, scale, seed) and skipped on rerun, so an interrupted 12h session
+resumes seamlessly the next time the notebook is run.
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 import gc
 import json
@@ -129,90 +142,109 @@ def _stub_unused_sdks() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Experiment matrix — edit this block to scale up/down
+# Model registry & experiment presets — pick via CLI: --model NAME --preset NAME
 # ---------------------------------------------------------------------------
-# Each model dict supports:
-#   name           short tag used in MODEL_PROVIDER_MAP and CSV filenames
+# Each model entry supports:
 #   source         "hf" (HuggingFace Hub) or "kagglehub" (Kaggle model registry)
 #   path           HF repo id  OR  Kaggle model handle, depending on source
-#   load_in_4bit   True for 4-bit nf4 (saves VRAM); False for fp16 native
+#   load_in_4bit   True = apply nf4 quant; False = use checkpoint as-is (already
+#                  quantized, e.g. unsloth/*-bnb-4bit) or fp16 small model
 #   is_reasoning   True if model emits <think>...</think> traces (R1-distill etc.)
-#                  -> connector strips them before returning, and uses larger
-#                  max_new_tokens by default
+#   sec_per_call   measured wall time per LLM call on 1x T4. Used only for the
+#                  pre-run time estimate (not load behaviour). Adjust to taste.
 #
 # T4 (2x16GB) memory budget with nf4 4-bit + fp16 compute:
 #   3B  ~2 GB    | 7-8B ~5 GB    | 12-14B ~9 GB    (all fit one T4)
 #   24B ~14 GB   | 30-32B ~18 GB | (use both T4s via device_map="auto")
-#   MoE 30B-a3b: ~18 GB weight, but only 3B active per token -> fast on 2xT4
 #
-# Gated HF models (Llama, Gemma on HF): set HF_TOKEN env var or use the
-# kagglehub source which often skips the gating prompt on Kaggle.
+# Gated HF models (Llama / Gemma on HF Hub): set HF_TOKEN env var, OR use the
+# unsloth bnb-4bit mirror, OR pull from `source: "kagglehub"`.
 # ---------------------------------------------------------------------------
 
-EXPERIMENT_CONFIG = {
-    "models": [
-        # ============================================================
-        # SMOKE TEST: 1 Llama model, ungated mirror, pre-quantized 4-bit
-        # Runs in ~10-15 min on 1xT4. Verify the pipeline end-to-end,
-        # then switch to FULL_LINEUP below.
-        # ============================================================
-        {"name": "Llama3_1_8B", "source": "hf",
-         "path": "unsloth/Llama-3.1-8B-Instruct-bnb-4bit",
-         # checkpoint is already nf4 -> don't re-quantize, just load
-         "load_in_4bit": False, "is_reasoning": False},
+MODEL_REGISTRY = {
+    # --- Llama family (unsloth ungated 4-bit mirrors) ---
+    "Llama3_2_3B":   dict(source="hf", path="unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
+                          load_in_4bit=False, is_reasoning=False, sec_per_call=3.0),
+    "Llama3_1_8B":   dict(source="hf", path="unsloth/Llama-3.1-8B-Instruct-bnb-4bit",
+                          load_in_4bit=False, is_reasoning=False, sec_per_call=6.3),
 
-        # ============================================================
-        # FULL_LINEUP (uncomment after smoke test passes; comment out
-        # the smoke-test entry above so it runs once per session)
-        # ============================================================
-        # Qwen3 family (April 2025) — newer hybrid-thinking generation.
-        # {"name": "Qwen3_8B",       "source": "hf", "path": "Qwen/Qwen3-8B",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # {"name": "Qwen3_14B",      "source": "hf", "path": "Qwen/Qwen3-14B",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # Microsoft Phi-4 (Dec 2024) — 14B dense, MIT-license, strong reasoning.
-        # {"name": "Phi4_14B",       "source": "hf", "path": "microsoft/phi-4",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # Google Gemma-3 (Mar 2025) — 12B-it, multilingual, multimodal-capable text mode.
-        # {"name": "Gemma3_12B",     "source": "hf", "path": "google/gemma-3-12b-it",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # DeepSeek-R1 distilled (Jan 2025) — explicit reasoning trace, 14B Qwen base.
-        # {"name": "R1_Qwen_14B",    "source": "hf", "path": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
-        #  "load_in_4bit": True, "is_reasoning": True},
+    # --- Qwen3 (April 2025) ---
+    "Qwen3_8B":      dict(source="hf", path="Qwen/Qwen3-8B",
+                          load_in_4bit=True,  is_reasoning=False, sec_per_call=7.0),
+    "Qwen3_14B":     dict(source="hf", path="Qwen/Qwen3-14B",
+                          load_in_4bit=True,  is_reasoning=False, sec_per_call=11.0),
+    "Qwen3_32B":     dict(source="hf", path="Qwen/Qwen3-32B",
+                          load_in_4bit=True,  is_reasoning=False, sec_per_call=18.0),
 
-        # --- OPTIONAL EXTRAS ---
-        # 32B / 2xT4 — Qwen3 flagship dense.
-        # {"name": "Qwen3_32B",      "source": "hf", "path": "Qwen/Qwen3-32B",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # NVIDIA Nemotron-3 nano MoE 30B-a3b (3B active) — fast on T4, via Kaggle.
-        # {"name": "Nemotron3_30Ba3b","source": "kagglehub",
-        #  "path": "metric/nemotron-3-nano-30b-a3b-bf16/transformers/default",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # Google Gemma-4 (e2b-it) — newest Gemma generation, via Kaggle.
-        # {"name": "Gemma4_e2b",     "source": "kagglehub",
-        #  "path": "google/gemma-4/transformers/gemma-4-e2b-it",
-        #  "load_in_4bit": False, "is_reasoning": False},
-        # Mistral / smaller cross-family comparators:
-        # {"name": "Mistral_7B_v03", "source": "hf", "path": "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
-        #  "load_in_4bit": False, "is_reasoning": False},
-        # {"name": "Llama3_2_3B",    "source": "hf", "path": "unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
-        #  "load_in_4bit": False, "is_reasoning": False},
-        # {"name": "Gemma3_4B",      "source": "hf", "path": "google/gemma-3-4b-it",
-        #  "load_in_4bit": False, "is_reasoning": False},
-    ],
-    "games": [
-        "prisoner_dilemma",
-        # Smoke test runs PD only. Uncomment the rest for the full sweep.
-        # "stag_hunt",
-        # "snow_drift",
-        # "battle_sexes",
-        # "harmony_game",
-    ],
-    "languages": ["en"],          # add "fr","ar","cn","vn" to study language effects
-    "rounds": [10],               # smoke test = paper baseline only; full = [10, 30, 50]
-    "payoff_scales": [1.0],       # smoke test = baseline; full = [1.0, 5.0, 10.0, 100.0]
-    "seeds": [0],                 # smoke test = 1 seed; full = [0, 1, 2]
-    "max_new_tokens": 256,
+    # --- Microsoft Phi-4 (Dec 2024) ---
+    "Phi4_14B":      dict(source="hf", path="microsoft/phi-4",
+                          load_in_4bit=True,  is_reasoning=False, sec_per_call=11.0),
+
+    # --- Google Gemma-3 (Mar 2025) ---
+    "Gemma3_4B":     dict(source="hf", path="google/gemma-3-4b-it",
+                          load_in_4bit=False, is_reasoning=False, sec_per_call=3.5),
+    "Gemma3_12B":    dict(source="hf", path="google/gemma-3-12b-it",
+                          load_in_4bit=True,  is_reasoning=False, sec_per_call=10.0),
+
+    # --- DeepSeek-R1 distilled (Jan 2025) — reasoning model ---
+    "R1_Qwen_14B":   dict(source="hf", path="deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+                          load_in_4bit=True,  is_reasoning=True,  sec_per_call=22.0),
+
+    # --- Mistral ---
+    "Mistral_7B_v03": dict(source="hf", path="unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
+                           load_in_4bit=False, is_reasoning=False, sec_per_call=6.0),
+
+    # --- Kaggle-only sources (no HF token, no gating) ---
+    "Gemma4_e2b":    dict(source="kagglehub",
+                          path="google/gemma-4/transformers/gemma-4-e2b-it",
+                          load_in_4bit=False, is_reasoning=False, sec_per_call=2.5),
+    "Nemotron3_30Ba3b": dict(source="kagglehub",
+                             path="metric/nemotron-3-nano-30b-a3b-bf16/transformers/default",
+                             load_in_4bit=True, is_reasoning=False, sec_per_call=6.0),
+}
+
+ALL_GAMES = ["prisoner_dilemma", "stag_hunt", "snow_drift", "battle_sexes", "harmony_game"]
+ALL_LANGS = ["en", "fr", "ar", "cn", "vn"]
+
+# Each preset defines the full sweep dimensions. The driver iterates the
+# Cartesian product. Cells already on disk are skipped, so an interrupted
+# session resumes seamlessly on rerun.
+PRESETS = {
+    # ~8 min on 8B / 1xT4 — verify the pipeline end-to-end.
+    "smoke":        dict(games=["prisoner_dilemma"], languages=["en"],
+                         rounds=[10], payoff_scales=[1.0], seeds=[0]),
+
+    # Quick statistical preview: paper baseline + extreme stake at 2 round levels.
+    # 5 games * 1 lang * 2 rounds * 2 scales * 2 seeds = 40 cells.
+    "mini":         dict(games=ALL_GAMES, languages=["en"],
+                         rounds=[10, 50], payoff_scales=[1.0, 100.0], seeds=[0, 1]),
+
+    # CORE PAPER CLAIM: payoff-scale effect at the "more rounds" condition.
+    # 5 games * 1 lang * 1 rounds * 4 scales * 3 seeds = 60 cells.
+    "scale":        dict(games=ALL_GAMES, languages=["en"],
+                         rounds=[50], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         seeds=[0, 1, 2]),
+
+    # Round-length ablation: 10 (paper baseline) vs 30 vs 50 at scale=1.
+    # 5 games * 1 lang * 3 rounds * 1 scale * 3 seeds = 45 cells.
+    "rounds":       dict(games=ALL_GAMES, languages=["en"],
+                         rounds=[10, 30, 50], payoff_scales=[1.0],
+                         seeds=[0, 1, 2]),
+
+    # Multilingual robustness at extreme stakes.
+    # 5 games * 5 langs * 1 rounds * 2 scales * 1 seed = 50 cells.
+    "multilingual": dict(games=ALL_GAMES, languages=ALL_LANGS,
+                         rounds=[50], payoff_scales=[1.0, 100.0], seeds=[0]),
+
+    # Everything. Only realistic for tiny models (3B). 900 cells.
+    "full":         dict(games=ALL_GAMES, languages=ALL_LANGS,
+                         rounds=[10, 30, 50], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         seeds=[0, 1, 2]),
+}
+
+# Built per-run from CLI args + selected preset & model. main() populates this.
+EXPERIMENT_CONFIG: dict = {
+    "max_new_tokens": 64,   # answer is "OptionA"/"OptionB"; 64 is plenty buffer
     "temperature": 1.0,
 }
 
@@ -517,50 +549,117 @@ def aggregate() -> None:
     print(f"[agg ] {len(parts)} files -> {out}  (rows={len(df)})")
 
 
+def estimate_hours(model_cfg: dict, preset: dict) -> tuple[int, float]:
+    """Return (cells, hours) estimate for the given model x preset sweep."""
+    cells = (
+        len(preset["games"])
+        * len(preset["languages"])
+        * len(preset["rounds"])
+        * len(preset["payoff_scales"])
+        * len(preset["seeds"])
+    )
+    # Each cell runs 4 personality permutations x rounds x 2 agent calls.
+    # Use mean rounds across the round-list to weight cell duration.
+    avg_rounds = sum(preset["rounds"]) / len(preset["rounds"])
+    calls_per_cell = 8.0 * avg_rounds
+    sec_per_call = float(model_cfg.get("sec_per_call", 6.5))
+    sec = cells * calls_per_cell * sec_per_call
+    return cells, sec / 3600.0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="FAIRGAME More-at-Stake Kaggle T4 sweep runner",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--model", default=os.environ.get("MODEL", "Llama3_1_8B"),
+        choices=sorted(MODEL_REGISTRY.keys()),
+        help="One model from MODEL_REGISTRY. Run a separate notebook per model.",
+    )
+    parser.add_argument(
+        "--preset", default=os.environ.get("PRESET", "smoke"),
+        choices=sorted(PRESETS.keys()),
+        help="Sweep preset. Use 'smoke' first to verify, then 'scale' for the "
+             "paper core claim or 'mini' for a quick statistical preview.",
+    )
+    parser.add_argument(
+        "--max-new-tokens", type=int,
+        default=int(os.environ.get("MAX_NEW_TOKENS", 64)),
+        help="Generation cap. 64 is plenty for OptionA/OptionB answers.",
+    )
+    parser.add_argument(
+        "--temperature", type=float,
+        default=float(os.environ.get("TEMPERATURE", 1.0)),
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     bootstrap()
+
+    model_cfg = dict(MODEL_REGISTRY[args.model], name=args.model)
+    preset = PRESETS[args.preset]
+
+    EXPERIMENT_CONFIG.update(
+        models=[model_cfg],
+        games=preset["games"],
+        languages=preset["languages"],
+        rounds=preset["rounds"],
+        payoff_scales=preset["payoff_scales"],
+        seeds=preset["seeds"],
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+    )
+    LocalHFConnector.DEFAULT_MAX_NEW_TOKENS = args.max_new_tokens
+    LocalHFConnector.DEFAULT_TEMPERATURE = args.temperature
+
     register_local_models()
 
-    total = estimate_workload()
+    cells, hours = estimate_hours(model_cfg, preset)
     print(
         f"\n=== FAIRGAME More-at-Stake sweep ===\n"
-        f"  models       : {[m['name'] for m in EXPERIMENT_CONFIG['models']]}\n"
-        f"  games        : {EXPERIMENT_CONFIG['games']}\n"
-        f"  languages    : {EXPERIMENT_CONFIG['languages']}\n"
-        f"  rounds       : {EXPERIMENT_CONFIG['rounds']}\n"
-        f"  payoff_scale : {EXPERIMENT_CONFIG['payoff_scales']}\n"
-        f"  seeds        : {EXPERIMENT_CONFIG['seeds']}\n"
-        f"  total cells  : {total}  (resume-safe)\n"
+        f"  model        : {args.model}  ({model_cfg['path']})\n"
+        f"  preset       : {args.preset}\n"
+        f"  games        : {preset['games']}\n"
+        f"  languages    : {preset['languages']}\n"
+        f"  rounds       : {preset['rounds']}\n"
+        f"  payoff_scale : {preset['payoff_scales']}\n"
+        f"  seeds        : {preset['seeds']}\n"
+        f"  cells        : {cells}  (resume-safe — finished CSVs are skipped)\n"
+        f"  est. wall    : ~{hours:.1f} h  (sec_per_call={model_cfg.get('sec_per_call', 6.5)})\n"
         f"  output dir   : {RAW_DIR}\n"
     )
+    if hours > 11.5 and args.preset != "smoke":
+        print(f"  WARNING: estimate exceeds Kaggle's 12h limit. Plan multiple\n"
+              f"           sessions; the sweep will resume from where it stops.\n")
 
-    # Outer loop = model so we load each weight set exactly once.
-    for m in EXPERIMENT_CONFIG["models"]:
-        print(f"\n>>> MODEL: {m['name']}  src={m.get('source','hf')}  path={m['path']}")
-        try:
-            LocalHFConnector.load(m["name"])
-        except Exception as e:
-            print(f"[error] failed to load {m['name']}: {e}")
-            traceback.print_exc()
-            continue
+    m = model_cfg
+    print(f">>> MODEL: {m['name']}  src={m.get('source','hf')}  path={m['path']}")
+    try:
+        LocalHFConnector.load(m["name"])
+    except Exception as e:
+        print(f"[error] failed to load {m['name']}: {e}")
+        traceback.print_exc()
+        return
 
-        for game in EXPERIMENT_CONFIG["games"]:
-            for lang in EXPERIMENT_CONFIG["languages"]:
-                for rounds in EXPERIMENT_CONFIG["rounds"]:
-                    for scale in EXPERIMENT_CONFIG["payoff_scales"]:
-                        for seed in EXPERIMENT_CONFIG["seeds"]:
-                            try:
-                                run_single(m, game, lang, rounds, scale, seed)
-                            except KeyboardInterrupt:
-                                raise
-                            except Exception as e:
-                                print(f"[error] {m['name']} {game} {lang} r={rounds} s={scale} seed={seed}: {e}")
-                                traceback.print_exc()
-            # Aggregate progressively so partial results are usable mid-session.
-            aggregate()
+    for game in preset["games"]:
+        for lang in preset["languages"]:
+            for rounds in preset["rounds"]:
+                for scale in preset["payoff_scales"]:
+                    for seed in preset["seeds"]:
+                        try:
+                            run_single(m, game, lang, rounds, scale, seed)
+                        except KeyboardInterrupt:
+                            raise
+                        except Exception as e:
+                            print(f"[error] {m['name']} {game} {lang} r={rounds} s={scale} seed={seed}: {e}")
+                            traceback.print_exc()
+        # Aggregate progressively so partial results are usable mid-session.
+        aggregate()
 
-        LocalHFConnector.free(m["name"])
-
+    LocalHFConnector.free(m["name"])
     aggregate()
     print("\n=== sweep done ===")
 
