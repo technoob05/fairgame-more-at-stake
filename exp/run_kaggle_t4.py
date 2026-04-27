@@ -111,23 +111,36 @@ def bootstrap() -> None:
 
 EXPERIMENT_CONFIG = {
     "models": [
-        # --- DEFAULT LINEUP: 5 newer models, all 1xT4 friendly with nf4 ---
-        # Qwen3 family (April 2025) — newer hybrid-thinking generation.
-        {"name": "Qwen3_8B",       "source": "hf", "path": "Qwen/Qwen3-8B",
-         "load_in_4bit": True, "is_reasoning": False},
-        {"name": "Qwen3_14B",      "source": "hf", "path": "Qwen/Qwen3-14B",
-         "load_in_4bit": True, "is_reasoning": False},
-        # Microsoft Phi-4 (Dec 2024) — 14B dense, MIT-license, strong reasoning.
-        {"name": "Phi4_14B",       "source": "hf", "path": "microsoft/phi-4",
-         "load_in_4bit": True, "is_reasoning": False},
-        # Google Gemma-3 (Mar 2025) — 12B-it, multilingual, multimodal-capable text mode.
-        {"name": "Gemma3_12B",     "source": "hf", "path": "google/gemma-3-12b-it",
-         "load_in_4bit": True, "is_reasoning": False},
-        # DeepSeek-R1 distilled (Jan 2025) — explicit reasoning trace, 14B Qwen base.
-        {"name": "R1_Qwen_14B",    "source": "hf", "path": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
-         "load_in_4bit": True, "is_reasoning": True},
+        # ============================================================
+        # SMOKE TEST: 1 Llama model, ungated mirror, pre-quantized 4-bit
+        # Runs in ~10-15 min on 1xT4. Verify the pipeline end-to-end,
+        # then switch to FULL_LINEUP below.
+        # ============================================================
+        {"name": "Llama3_1_8B", "source": "hf",
+         "path": "unsloth/Llama-3.1-8B-Instruct-bnb-4bit",
+         # checkpoint is already nf4 -> don't re-quantize, just load
+         "load_in_4bit": False, "is_reasoning": False},
 
-        # --- OPTIONAL EXTRAS: uncomment to expand the sweep ---
+        # ============================================================
+        # FULL_LINEUP (uncomment after smoke test passes; comment out
+        # the smoke-test entry above so it runs once per session)
+        # ============================================================
+        # Qwen3 family (April 2025) — newer hybrid-thinking generation.
+        # {"name": "Qwen3_8B",       "source": "hf", "path": "Qwen/Qwen3-8B",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # {"name": "Qwen3_14B",      "source": "hf", "path": "Qwen/Qwen3-14B",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # Microsoft Phi-4 (Dec 2024) — 14B dense, MIT-license, strong reasoning.
+        # {"name": "Phi4_14B",       "source": "hf", "path": "microsoft/phi-4",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # Google Gemma-3 (Mar 2025) — 12B-it, multilingual, multimodal-capable text mode.
+        # {"name": "Gemma3_12B",     "source": "hf", "path": "google/gemma-3-12b-it",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # DeepSeek-R1 distilled (Jan 2025) — explicit reasoning trace, 14B Qwen base.
+        # {"name": "R1_Qwen_14B",    "source": "hf", "path": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+        #  "load_in_4bit": True, "is_reasoning": True},
+
+        # --- OPTIONAL EXTRAS ---
         # 32B / 2xT4 — Qwen3 flagship dense.
         # {"name": "Qwen3_32B",      "source": "hf", "path": "Qwen/Qwen3-32B",
         #  "load_in_4bit": True, "is_reasoning": False},
@@ -139,27 +152,26 @@ EXPERIMENT_CONFIG = {
         # {"name": "Gemma4_e2b",     "source": "kagglehub",
         #  "path": "google/gemma-4/transformers/gemma-4-e2b-it",
         #  "load_in_4bit": False, "is_reasoning": False},
-        # Cross-family small comparators (gated on HF, set HF_TOKEN):
-        # {"name": "Llama3_1_8B",    "source": "hf", "path": "meta-llama/Llama-3.1-8B-Instruct",
-        #  "load_in_4bit": True, "is_reasoning": False},
-        # {"name": "Llama3_2_3B",    "source": "hf", "path": "meta-llama/Llama-3.2-3B-Instruct",
+        # Mistral / smaller cross-family comparators:
+        # {"name": "Mistral_7B_v03", "source": "hf", "path": "unsloth/mistral-7b-instruct-v0.3-bnb-4bit",
         #  "load_in_4bit": False, "is_reasoning": False},
-        # {"name": "Mistral_7B_v03", "source": "hf", "path": "mistralai/Mistral-7B-Instruct-v0.3",
-        #  "load_in_4bit": True, "is_reasoning": False},
+        # {"name": "Llama3_2_3B",    "source": "hf", "path": "unsloth/Llama-3.2-3B-Instruct-bnb-4bit",
+        #  "load_in_4bit": False, "is_reasoning": False},
         # {"name": "Gemma3_4B",      "source": "hf", "path": "google/gemma-3-4b-it",
         #  "load_in_4bit": False, "is_reasoning": False},
     ],
     "games": [
         "prisoner_dilemma",
-        "stag_hunt",
-        "snow_drift",
-        "battle_sexes",
-        "harmony_game",
+        # Smoke test runs PD only. Uncomment the rest for the full sweep.
+        # "stag_hunt",
+        # "snow_drift",
+        # "battle_sexes",
+        # "harmony_game",
     ],
     "languages": ["en"],          # add "fr","ar","cn","vn" to study language effects
-    "rounds": [10, 30, 50],       # 10 = paper baseline; 30/50 = "more rounds" condition
-    "payoff_scales": [1.0, 5.0, 10.0, 100.0],  # multiplies all weight* in payoffMatrix
-    "seeds": [0, 1, 2],           # repeats; each uses sampling so trajectories differ
+    "rounds": [10],               # smoke test = paper baseline only; full = [10, 30, 50]
+    "payoff_scales": [1.0],       # smoke test = baseline; full = [1.0, 5.0, 10.0, 100.0]
+    "seeds": [0],                 # smoke test = 1 seed; full = [0, 1, 2]
     "max_new_tokens": 256,
     "temperature": 1.0,
 }
