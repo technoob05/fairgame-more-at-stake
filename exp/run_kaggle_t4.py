@@ -35,10 +35,12 @@ Available presets:
   scale         60 cells    ~42h*     5 games x 50 rounds x 4 scales x 3 seeds
   rounds        45 cells    ~19h*     5 games x [10,30,50] rounds x scale=1
   multilingual  50 cells    ~35h*     5 games x 5 langs x 50 rounds x [1,100]
-  pd_paper      100 cells   ~42h*    PD-FOCUSED CORE: PD only, 5 langs, 30 rounds,
-                                      4 scales, 5 seeds — paper narrative
-  pd_lite       45 cells    ~19h*     PD only, 5 langs, 30 rounds, 3 scales, 3 seeds
-  pd_rounds     120 cells   ~50h*     PD only, 5 langs, [10,30] rounds, 4 scales, 3 seeds
+  pd_replication 150 cells  ~21h*    EXACT match of paper's setup: PD, 5 langs,
+                                      lambda in {0.1, 1, 10}, 10 rounds, 10 seeds
+  pd_paper      100 cells   ~42h*    EXTENSION: PD, 5 langs, 30 rounds,
+                                      lambda in {0.1, 1, 10, 100}, 5 seeds
+  pd_lite       45 cells    ~19h*    PD, 5 langs, 30 rounds, 3 scales, 3 seeds
+  pd_rounds     120 cells   ~50h*    PD, 5 langs, [10,30] rounds, 4 scales, 3 seeds
   full          900 cells   ~375h*    everything (only realistic for 3B models)
 
   (* estimates assume Llama-8B at ~6.3s/call. Smaller=faster, larger=slower.)
@@ -240,23 +242,32 @@ PRESETS = {
     "multilingual": dict(games=ALL_GAMES, languages=ALL_LANGS,
                          rounds=[50], payoff_scales=[1.0, 100.0], seeds=[0]),
 
-    # PD-focused, paper-aligned narrative: PD only, all 5 paper languages,
-    # 30 rounds (3x baseline, well past the "endgame defection" zone),
-    # 4 log-spaced payoff scales, 5 seeds for tight 95% CIs. ~42h on 8B.
-    # 1 game * 5 langs * 1 rounds * 4 scales * 5 seeds = 100 cells.
+    # EXACT REPLICATION of Buscemi et al. + this paper's published setup:
+    # PD only, 5 languages, lambda in {0.1, 1.0, 10.0}, 10 rounds, 10 repeats.
+    # 1 * 5 * 1 * 3 * 10 = 150 cells, ~21h on 8B (2 Kaggle sessions).
+    # Use this to confirm whether the paper's commercial-LLM findings
+    # replicate on open-weight models.
+    "pd_replication": dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
+                           rounds=[10], payoff_scales=[0.1, 1.0, 10.0],
+                           seeds=list(range(10))),
+
+    # CORE EXTENSION of paper. Adds super-amplified stakes (lambda=100) and
+    # the "more rounds" condition (30) on top of the paper's 5 langs.
+    # 5 seeds for tight 95% CIs (paper used 10; we trade a bit of CI tightness
+    # for the extra dimensions). 1 * 5 * 1 * 4 * 5 = 100 cells, ~42h on 8B.
     "pd_paper":     dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
-                         rounds=[30], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         rounds=[30], payoff_scales=[0.1, 1.0, 10.0, 100.0],
                          seeds=[0, 1, 2, 3, 4]),
 
-    # PD-focused but lighter: 3 scales x 3 seeds. ~19h on 8B (2 Kaggle sessions).
+    # Lighter PD-focused for a 2-session model: 3 scales x 3 seeds. ~19h on 8B.
     "pd_lite":      dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
-                         rounds=[30], payoff_scales=[1.0, 10.0, 100.0],
+                         rounds=[30], payoff_scales=[0.1, 1.0, 10.0],
                          seeds=[0, 1, 2]),
 
-    # PD-focused with both round conditions for a within-paper round-effect plot.
+    # PD with both round conditions — lets us plot the round-length effect.
     # 1 game * 5 langs * 2 rounds * 4 scales * 3 seeds = 120 cells, ~50h on 8B.
     "pd_rounds":    dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
-                         rounds=[10, 30], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         rounds=[10, 30], payoff_scales=[0.1, 1.0, 10.0, 100.0],
                          seeds=[0, 1, 2]),
 
     # Everything. Only realistic for tiny models (3B). 900 cells.
