@@ -404,6 +404,26 @@ def aggregate() -> None:
     print(f"[agg ] {len(parts)} files -> {out}  (rows={len(df)})")
 
 
+def zip_results(tag: str) -> Path | None:
+    """Pack RESULTS_DIR into a single zip in WORKDIR for easy Kaggle download.
+
+    The zip lands directly in /kaggle/working/results_<tag>.zip so it shows up
+    in the Kaggle notebook's "Output" panel and can be downloaded with one click.
+    """
+    import shutil
+    if not RAW_DIR.exists() or not any(RAW_DIR.iterdir()):
+        print("[zip ] nothing to zip yet")
+        return None
+    base = WORKDIR / f"results_{tag}"
+    zip_path = base.with_suffix(".zip")
+    if zip_path.exists():
+        zip_path.unlink()
+    shutil.make_archive(str(base), "zip", root_dir=str(RESULTS_DIR))
+    size_mb = zip_path.stat().st_size / 1e6
+    print(f"[zip ] {zip_path}  ({size_mb:.2f} MB)")
+    return zip_path
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint — called by exp_*.py drivers
 # ---------------------------------------------------------------------------
@@ -469,4 +489,5 @@ def run_experiment(
 
     LocalHFConnector.free(model)
     aggregate()
+    zip_results(f"{model}__s{scale:g}")
     print("\n=== slice done ===")
