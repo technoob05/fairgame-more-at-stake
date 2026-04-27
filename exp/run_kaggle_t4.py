@@ -14,7 +14,15 @@ Self-contained script that:
 
 How to run on Kaggle (T4 x2 recommended):
   - Create a new notebook, GPU T4 x2, Internet ON.
+  - For gated HF models (Llama, Gemma on HF Hub), add a Kaggle Secret named
+    HF_TOKEN with your HuggingFace access token, then attach it to the
+    notebook (Add-ons -> Secrets). The kagglehub-sourced models do not need it.
   - Single cell:
+        import os
+        from kaggle_secrets import UserSecretsClient
+        try: os.environ['HF_TOKEN'] = UserSecretsClient().get_secret('HF_TOKEN')
+        except Exception: pass
+
         !wget -q https://raw.githubusercontent.com/technoob05/fairgame-more-at-stake/main/exp/run_kaggle_t4.py
         !python run_kaggle_t4.py
   - Outputs land in /kaggle/working/results/.
@@ -71,30 +79,75 @@ def bootstrap() -> None:
     _pip_install(
         "python-dotenv",
         "pandas",
-        "transformers>=4.45,<5",
+        "transformers>=4.50,<5",   # Qwen3 / Gemma3 / Phi-4 chat templates
         "accelerate>=0.33",
         "bitsandbytes>=0.43",
         "sentencepiece",
         "protobuf",
+        "kagglehub",               # for Gemma-4 / Nemotron via Kaggle model registry
     )
 
 
 # ---------------------------------------------------------------------------
 # Experiment matrix — edit this block to scale up/down
 # ---------------------------------------------------------------------------
-# Notes on Kaggle T4 (2x16GB) memory budget with nf4 4-bit:
-#   Qwen2.5-7B-Instruct  ~5 GB    (fits 1 GPU)
-#   Qwen2.5-14B-Instruct ~9 GB    (fits 1 GPU)
-#   Qwen2.5-32B-Instruct ~18 GB   (uses both GPUs via device_map="auto")
-# A 12h Kaggle session can typically finish ~600-1200 short games depending
-# on output token length. Trim `seeds` or `payoff_scales` if you run out.
+# Each model dict supports:
+#   name           short tag used in MODEL_PROVIDER_MAP and CSV filenames
+#   source         "hf" (HuggingFace Hub) or "kagglehub" (Kaggle model registry)
+#   path           HF repo id  OR  Kaggle model handle, depending on source
+#   load_in_4bit   True for 4-bit nf4 (saves VRAM); False for fp16 native
+#   is_reasoning   True if model emits <think>...</think> traces (R1-distill etc.)
+#                  -> connector strips them before returning, and uses larger
+#                  max_new_tokens by default
+#
+# T4 (2x16GB) memory budget with nf4 4-bit + fp16 compute:
+#   3B  ~2 GB    | 7-8B ~5 GB    | 12-14B ~9 GB    (all fit one T4)
+#   24B ~14 GB   | 30-32B ~18 GB | (use both T4s via device_map="auto")
+#   MoE 30B-a3b: ~18 GB weight, but only 3B active per token -> fast on 2xT4
+#
+# Gated HF models (Llama, Gemma on HF): set HF_TOKEN env var or use the
+# kagglehub source which often skips the gating prompt on Kaggle.
 # ---------------------------------------------------------------------------
 
 EXPERIMENT_CONFIG = {
     "models": [
-        {"name": "Qwen2_5_7B",  "hf_id": "Qwen/Qwen2.5-7B-Instruct",  "load_in_4bit": True},
-        {"name": "Qwen2_5_14B", "hf_id": "Qwen/Qwen2.5-14B-Instruct", "load_in_4bit": True},
-        {"name": "Qwen2_5_32B", "hf_id": "Qwen/Qwen2.5-32B-Instruct", "load_in_4bit": True},
+        # --- DEFAULT LINEUP: 5 newer models, all 1xT4 friendly with nf4 ---
+        # Qwen3 family (April 2025) — newer hybrid-thinking generation.
+        {"name": "Qwen3_8B",       "source": "hf", "path": "Qwen/Qwen3-8B",
+         "load_in_4bit": True, "is_reasoning": False},
+        {"name": "Qwen3_14B",      "source": "hf", "path": "Qwen/Qwen3-14B",
+         "load_in_4bit": True, "is_reasoning": False},
+        # Microsoft Phi-4 (Dec 2024) — 14B dense, MIT-license, strong reasoning.
+        {"name": "Phi4_14B",       "source": "hf", "path": "microsoft/phi-4",
+         "load_in_4bit": True, "is_reasoning": False},
+        # Google Gemma-3 (Mar 2025) — 12B-it, multilingual, multimodal-capable text mode.
+        {"name": "Gemma3_12B",     "source": "hf", "path": "google/gemma-3-12b-it",
+         "load_in_4bit": True, "is_reasoning": False},
+        # DeepSeek-R1 distilled (Jan 2025) — explicit reasoning trace, 14B Qwen base.
+        {"name": "R1_Qwen_14B",    "source": "hf", "path": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+         "load_in_4bit": True, "is_reasoning": True},
+
+        # --- OPTIONAL EXTRAS: uncomment to expand the sweep ---
+        # 32B / 2xT4 — Qwen3 flagship dense.
+        # {"name": "Qwen3_32B",      "source": "hf", "path": "Qwen/Qwen3-32B",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # NVIDIA Nemotron-3 nano MoE 30B-a3b (3B active) — fast on T4, via Kaggle.
+        # {"name": "Nemotron3_30Ba3b","source": "kagglehub",
+        #  "path": "metric/nemotron-3-nano-30b-a3b-bf16/transformers/default",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # Google Gemma-4 (e2b-it) — newest Gemma generation, via Kaggle.
+        # {"name": "Gemma4_e2b",     "source": "kagglehub",
+        #  "path": "google/gemma-4/transformers/gemma-4-e2b-it",
+        #  "load_in_4bit": False, "is_reasoning": False},
+        # Cross-family small comparators (gated on HF, set HF_TOKEN):
+        # {"name": "Llama3_1_8B",    "source": "hf", "path": "meta-llama/Llama-3.1-8B-Instruct",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # {"name": "Llama3_2_3B",    "source": "hf", "path": "meta-llama/Llama-3.2-3B-Instruct",
+        #  "load_in_4bit": False, "is_reasoning": False},
+        # {"name": "Mistral_7B_v03", "source": "hf", "path": "mistralai/Mistral-7B-Instruct-v0.3",
+        #  "load_in_4bit": True, "is_reasoning": False},
+        # {"name": "Gemma3_4B",      "source": "hf", "path": "google/gemma-3-4b-it",
+        #  "load_in_4bit": False, "is_reasoning": False},
     ],
     "games": [
         "prisoner_dilemma",
@@ -125,69 +178,126 @@ GAME_CONFIG_FILES = {
 # Local HuggingFace connector — patches into FAIRGAME's factory
 # ---------------------------------------------------------------------------
 
-class LocalHFConnector:
-    """LLM connector that runs a HuggingFace causal LM on the local GPU.
+_THINK_RE = None  # compiled lazily
 
-    Plugs into FAIRGAME via `MODEL_PROVIDER_MAP[name] = (LocalHFConnector, hf_id)`.
-    The model is loaded lazily on first prompt and cached as a class-level singleton
-    keyed by hf_id, so the entire experiment sweep for one model reuses one load.
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> traces emitted by R1-distill style reasoning models.
+
+    Returns the post-think payload only. If the close tag is missing the model
+    ran out of budget while thinking — return whatever follows a sentinel or
+    an empty string so the FAIRGAME parser does not pick the trace as a choice.
+    """
+    global _THINK_RE
+    if _THINK_RE is None:
+        import re
+        _THINK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+    cleaned = _THINK_RE.sub("", text)
+    # If a stray opening <think> remains (no close), keep only what follows it.
+    if "<think" in cleaned.lower():
+        idx = cleaned.lower().rfind("</think>")
+        cleaned = cleaned[idx + len("</think>"):] if idx >= 0 else ""
+    return cleaned.strip()
+
+
+class LocalHFConnector:
+    """LLM connector that runs a HuggingFace / kagglehub causal LM on the local GPU.
+
+    Plugs into FAIRGAME via `MODEL_PROVIDER_MAP[name] = (LocalHFConnector, name)`.
+    A class-level registry holds the full model_cfg so the connector can resolve
+    source / quantization / reasoning flags from just the short name. Models are
+    loaded lazily on first prompt and cached, so a sweep for one model reuses
+    the same weights across hundreds of game runs.
     """
 
-    _model_cache: dict = {}   # hf_id -> (tokenizer, model)
+    _registry: dict = {}      # short_name -> model_cfg dict
+    _model_cache: dict = {}   # short_name -> (tokenizer, model)
     DEFAULT_MAX_NEW_TOKENS = EXPERIMENT_CONFIG["max_new_tokens"]
+    REASONING_MAX_NEW_TOKENS = 1024   # give R1-distill room for its trace
     DEFAULT_TEMPERATURE = EXPERIMENT_CONFIG["temperature"]
 
+    @classmethod
+    def register(cls, model_cfg: dict) -> None:
+        cls._registry[model_cfg["name"]] = model_cfg
+
     def __init__(self, provider_model: str, temperature: float | None = None):
-        self.hf_id = provider_model
+        # provider_model is the short tag we registered under
+        self.short_name = provider_model
+        cfg = self._registry.get(provider_model, {})
+        self.cfg = cfg
+        self.is_reasoning = bool(cfg.get("is_reasoning", False))
         self.temperature = self.DEFAULT_TEMPERATURE if temperature is None else temperature
-        self.max_new_tokens = self.DEFAULT_MAX_NEW_TOKENS
+        self.max_new_tokens = (
+            self.REASONING_MAX_NEW_TOKENS if self.is_reasoning else self.DEFAULT_MAX_NEW_TOKENS
+        )
 
     @classmethod
-    def load(cls, hf_id: str, load_in_4bit: bool = True):
-        if hf_id in cls._model_cache:
-            return cls._model_cache[hf_id]
+    def _resolve_local_path(cls, cfg: dict) -> str:
+        """Return a local filesystem path or HF repo id ready for from_pretrained."""
+        src = cfg.get("source", "hf")
+        path = cfg["path"]
+        if src == "kagglehub":
+            import kagglehub
+            return kagglehub.model_download(path)
+        return path  # HF repo id; from_pretrained handles the download + cache
+
+    @classmethod
+    def load(cls, short_name: str):
+        if short_name in cls._model_cache:
+            return cls._model_cache[short_name]
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-        print(f"[hf] loading {hf_id} (4bit={load_in_4bit})")
+        cfg = cls._registry[short_name]
+        load_in_4bit = bool(cfg.get("load_in_4bit", True))
+        model_path = cls._resolve_local_path(cfg)
+        hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+
+        print(f"[hf] loading {short_name}  src={cfg.get('source','hf')}  4bit={load_in_4bit}  path={cfg['path']}")
         t0 = time.time()
         bnb = None
         if load_in_4bit:
             bnb = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_compute_dtype=torch.float16,   # T4 has no native bf16
                 bnb_4bit_use_double_quant=True,
             )
-        tok = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
+        tok_kw = {"trust_remote_code": True}
+        if hf_token and cfg.get("source", "hf") == "hf":
+            tok_kw["token"] = hf_token
+        tok = AutoTokenizer.from_pretrained(model_path, **tok_kw)
         if tok.pad_token_id is None:
             tok.pad_token = tok.eos_token
-        mdl = AutoModelForCausalLM.from_pretrained(
-            hf_id,
-            quantization_config=bnb,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-        )
+
+        mdl_kw = {
+            "quantization_config": bnb,
+            "device_map": "auto",
+            "torch_dtype": torch.float16,
+            "trust_remote_code": True,
+        }
+        if hf_token and cfg.get("source", "hf") == "hf":
+            mdl_kw["token"] = hf_token
+        mdl = AutoModelForCausalLM.from_pretrained(model_path, **mdl_kw)
         mdl.eval()
-        cls._model_cache[hf_id] = (tok, mdl)
-        print(f"[hf] loaded {hf_id} in {time.time() - t0:.1f}s")
-        return cls._model_cache[hf_id]
+        cls._model_cache[short_name] = (tok, mdl)
+        print(f"[hf] loaded {short_name} in {time.time() - t0:.1f}s")
+        return cls._model_cache[short_name]
 
     @classmethod
-    def free(cls, hf_id: str | None = None) -> None:
+    def free(cls, short_name: str | None = None) -> None:
         import torch
-        ids = [hf_id] if hf_id else list(cls._model_cache.keys())
-        for i in ids:
-            cls._model_cache.pop(i, None)
+        names = [short_name] if short_name else list(cls._model_cache.keys())
+        for n in names:
+            cls._model_cache.pop(n, None)
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        print(f"[hf] freed {ids}")
+        print(f"[hf] freed {names}")
 
     def send_prompt(self, prompt: str) -> str:
         import torch
-        tok, mdl = self.load(self.hf_id, load_in_4bit=True)
+        tok, mdl = self.load(self.short_name)
         msgs = [{"role": "user", "content": prompt}]
         ids = tok.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=True, return_tensors="pt"
@@ -200,14 +310,18 @@ class LocalHFConnector:
                 do_sample=self.temperature > 0,
                 pad_token_id=tok.pad_token_id,
             )
-        return tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        text = tok.decode(out[0, ids.shape[1]:], skip_special_tokens=True)
+        if self.is_reasoning:
+            text = _strip_thinking(text)
+        return text
 
 
 def register_local_models() -> None:
     """Inject our local connectors into FAIRGAME's provider map."""
     from src.llm_connectors import llm_factory_connector as fc
     for m in EXPERIMENT_CONFIG["models"]:
-        fc.MODEL_PROVIDER_MAP[m["name"]] = (LocalHFConnector, m["hf_id"])
+        LocalHFConnector.register(m)
+        fc.MODEL_PROVIDER_MAP[m["name"]] = (LocalHFConnector, m["name"])
     print("[patch] MODEL_PROVIDER_MAP now includes:",
           [m["name"] for m in EXPERIMENT_CONFIG["models"]])
 
@@ -291,7 +405,9 @@ def run_single(model_cfg, game, lang, rounds, scale, seed) -> Path | None:
     results = factory.create_and_run_games(cfg)
     df = ResultsProcessor().process(results)
     df["meta_model"] = model_cfg["name"]
-    df["meta_hf_id"] = model_cfg["hf_id"]
+    df["meta_source"] = model_cfg.get("source", "hf")
+    df["meta_path"] = model_cfg["path"]
+    df["meta_is_reasoning"] = bool(model_cfg.get("is_reasoning", False))
     df["meta_game"] = game
     df["meta_language"] = lang
     df["meta_rounds"] = rounds
@@ -354,11 +470,11 @@ def main() -> None:
 
     # Outer loop = model so we load each weight set exactly once.
     for m in EXPERIMENT_CONFIG["models"]:
-        print(f"\n>>> MODEL: {m['name']} ({m['hf_id']})")
+        print(f"\n>>> MODEL: {m['name']}  src={m.get('source','hf')}  path={m['path']}")
         try:
-            LocalHFConnector.load(m["hf_id"], load_in_4bit=m.get("load_in_4bit", True))
+            LocalHFConnector.load(m["name"])
         except Exception as e:
-            print(f"[error] failed to load {m['hf_id']}: {e}")
+            print(f"[error] failed to load {m['name']}: {e}")
             traceback.print_exc()
             continue
 
@@ -377,7 +493,7 @@ def main() -> None:
             # Aggregate progressively so partial results are usable mid-session.
             aggregate()
 
-        LocalHFConnector.free(m["hf_id"])
+        LocalHFConnector.free(m["name"])
 
     aggregate()
     print("\n=== sweep done ===")
