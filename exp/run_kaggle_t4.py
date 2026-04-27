@@ -32,9 +32,13 @@ Available models: see MODEL_REGISTRY below.
 Available presets:
   smoke         1 cell      ~8 min    sanity check
   mini          40 cells    ~17h*     5 games x [10,50] rounds x [1,100] scales
-  scale         60 cells    ~42h*     CORE: 5 games x 50 rounds x 4 scales x 3 seeds
+  scale         60 cells    ~42h*     5 games x 50 rounds x 4 scales x 3 seeds
   rounds        45 cells    ~19h*     5 games x [10,30,50] rounds x scale=1
   multilingual  50 cells    ~35h*     5 games x 5 langs x 50 rounds x [1,100]
+  pd_paper      100 cells   ~42h*    PD-FOCUSED CORE: PD only, 5 langs, 30 rounds,
+                                      4 scales, 5 seeds — paper narrative
+  pd_lite       45 cells    ~19h*     PD only, 5 langs, 30 rounds, 3 scales, 3 seeds
+  pd_rounds     120 cells   ~50h*     PD only, 5 langs, [10,30] rounds, 4 scales, 3 seeds
   full          900 cells   ~375h*    everything (only realistic for 3B models)
 
   (* estimates assume Llama-8B at ~6.3s/call. Smaller=faster, larger=slower.)
@@ -235,6 +239,25 @@ PRESETS = {
     # 5 games * 5 langs * 1 rounds * 2 scales * 1 seed = 50 cells.
     "multilingual": dict(games=ALL_GAMES, languages=ALL_LANGS,
                          rounds=[50], payoff_scales=[1.0, 100.0], seeds=[0]),
+
+    # PD-focused, paper-aligned narrative: PD only, all 5 paper languages,
+    # 30 rounds (3x baseline, well past the "endgame defection" zone),
+    # 4 log-spaced payoff scales, 5 seeds for tight 95% CIs. ~42h on 8B.
+    # 1 game * 5 langs * 1 rounds * 4 scales * 5 seeds = 100 cells.
+    "pd_paper":     dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
+                         rounds=[30], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         seeds=[0, 1, 2, 3, 4]),
+
+    # PD-focused but lighter: 3 scales x 3 seeds. ~19h on 8B (2 Kaggle sessions).
+    "pd_lite":      dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
+                         rounds=[30], payoff_scales=[1.0, 10.0, 100.0],
+                         seeds=[0, 1, 2]),
+
+    # PD-focused with both round conditions for a within-paper round-effect plot.
+    # 1 game * 5 langs * 2 rounds * 4 scales * 3 seeds = 120 cells, ~50h on 8B.
+    "pd_rounds":    dict(games=["prisoner_dilemma"], languages=ALL_LANGS,
+                         rounds=[10, 30], payoff_scales=[1.0, 5.0, 10.0, 100.0],
+                         seeds=[0, 1, 2]),
 
     # Everything. Only realistic for tiny models (3B). 900 cells.
     "full":         dict(games=ALL_GAMES, languages=ALL_LANGS,
