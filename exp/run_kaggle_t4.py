@@ -85,6 +85,13 @@ def bootstrap() -> None:
         "sentencepiece",
         "protobuf",
         "kagglehub",               # for Gemma-4 / Nemotron via Kaggle model registry
+        # FAIRGAME's llm_factory imports these at module load even though we
+        # never call them — without these installed the import chain fails.
+        "anthropic",
+        "mistralai",
+        "openai",
+        "striprtf",                # used by FileManager for cn/vn .rtf templates
+        "retry",
     )
 
 
